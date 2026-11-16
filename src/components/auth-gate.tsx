@@ -66,9 +66,6 @@ function needsVerification(failure: Failure): boolean {
   return failure.status === 403 || failure.code === "EMAIL_NOT_VERIFIED" || /not verified/i.test(failure.message);
 }
 
-// Turn this on again once your own Google login app is set up in Neon.
-const GOOGLE_ENABLED = false;
-
 export function AuthGate({ children }: { children: ReactNode }) {
   const { data: session, isPending } = authClient.useSession();
 
@@ -271,7 +268,7 @@ export function AuthScreen() {
     reset: ["Choose a new password", "Enter the code we sent and pick a new password."],
   };
   const [title, subtitle] = titles[view];
-const showGoogle = GOOGLE_ENABLED && (view === "signin" || view === "signup");
+  const showGoogle = view === "signin" || view === "signup";
 
   const passwordField = (label: string, placeholder: string, autoComplete: string) => (
     <>
