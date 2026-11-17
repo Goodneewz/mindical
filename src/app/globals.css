@@ -293,3 +293,28 @@ button:disabled { cursor: not-allowed; }
   margin: auto;
   flex-shrink: 0;
 }
+/* Full-screen training room on phones */
+@media (max-width: 640px) {
+  .game-overlay-backdrop {
+    padding: 0 !important;
+    display: flex !important;
+    align-items: stretch !important;
+    justify-content: stretch !important;
+    overflow-y: auto !important;
+  }
+
+  .game-window {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-height: 100dvh !important;
+    height: auto !important;
+    max-height: none !important;
+    margin: 0 !important;
+    border-radius: 0 !important;
+    overflow-y: auto !important;
+  }
+
+  .drop-field {
+    min-height: 48vh !important;
+  }
+}
