@@ -202,6 +202,52 @@ const DEFAULT_PROFILE: LearnerProfile = {
   lastPlayedAt: null,
 };
 
+const GUEST_PROFILE_KEY = "mindical-guest-profile";
+const GUEST_SESSIONS_KEY = "mindical-guest-sessions";
+
+function readGuestSessions(): SavedSession[] {
+  if (typeof window === "undefined") return [];
+
+  try {
+    const raw = window.localStorage.getItem(GUEST_SESSIONS_KEY);
+    if (!raw) return [];
+
+    const saved = JSON.parse(raw);
+    return Array.isArray(saved) ? (saved as SavedSession[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeGuestSessions(sessions: SavedSession[]) {
+  try {
+    window.localStorage.setItem(
+      GUEST_SESSIONS_KEY,
+      JSON.stringify(sessions),
+    );
+  } catch {
+    // Guest games still work when browser storage is unavailable.
+  }
+}
+
+function writeGuestProfile(profile: LearnerProfile) {
+  try {
+    window.localStorage.setItem(
+      GUEST_PROFILE_KEY,
+      JSON.stringify(profile),
+    );
+  } catch {
+    // Guest games still work when browser storage is unavailable.
+  }
+}
+
+function guestXpForResult(result: RunResult) {
+  return Math.max(
+    5,
+    Math.round(result.score / 20 + result.accuracy / 5),
+  );
+}
+
 function Icon({
   name,
   size = 18,
@@ -466,7 +512,15 @@ function dayLabel(dateString: string) {
   return new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).format(date);
 }
 
-export default function MindicalApp({ initialProfile }: { initialProfile?: LearnerProfile }) {
+export default function MindicalApp({
+  initialProfile,
+  isGuest = false,
+  onGuestExit,
+}: {
+  initialProfile?: LearnerProfile;
+  isGuest?: boolean;
+  onGuestExit?: () => void;
+}) {
   const [section, setSection] = useState<Section>("home");
   const [profile, setProfile] = useState<LearnerProfile>(initialProfile ?? DEFAULT_PROFILE);
   const [sessions, setSessions] = useState<SavedSession[]>([]);
@@ -501,16 +555,26 @@ export default function MindicalApp({ initialProfile }: { initialProfile?: Learn
   }, []);
 
   useEffect(() => {
-    setTodayLabel(
-      new Intl.DateTimeFormat("en", {
-        weekday: "long",
-        month: "long",
-        day: "numeric",
-      }).format(new Date()),
-    );
-    setWeekdayIndex((new Date().getDay() + 6) % 7);
-    void loadDashboard();
-  }, [loadDashboard]);
+  setTodayLabel(
+    new Intl.DateTimeFormat("en", {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+    }).format(new Date()),
+  );
+
+  setWeekdayIndex((new Date().getDay() + 6) % 7);
+
+  if (isGuest) {
+    setSessions(readGuestSessions());
+    setLeaderboard([]);
+    setSyncOffline(true);
+    setLoading(false);
+    return;
+  }
+
+  void loadDashboard();
+}, [isGuest, loadDashboard]);
 
   const notify = useCallback((message: string) => {
     setToast(message);
@@ -531,20 +595,63 @@ export default function MindicalApp({ initialProfile }: { initialProfile?: Learn
   );
 
   const handleSessionComplete = useCallback(
-    async (result: RunResult) => {
-      const response = await fetch("/api/sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(result),
+  async (result: RunResult) => {
+    if (isGuest) {
+      const xpEarned = guestXpForResult(result);
+
+      const guestSession: SavedSession = {
+        id: Date.now(),
+        mode: result.mode,
+        score: result.score,
+        accuracy: result.accuracy,
+        durationSeconds: result.durationSeconds,
+        bestStreak: result.bestStreak,
+        xpEarned,
+        createdAt: new Date().toISOString(),
+      };
+
+      setSessions((current) => {
+        const updated = [guestSession, ...current].slice(0, 100);
+        writeGuestSessions(updated);
+        return updated;
       });
-      if (!response.ok) throw new Error("Could not sync this session.");
-      const payload = (await response.json()) as { profile: LearnerProfile; xpEarned: number };
-      setProfile(payload.profile);
-      await loadDashboard();
-      return payload.xpEarned;
-    },
-    [loadDashboard],
-  );
+
+      setProfile((current) => {
+        const updated: LearnerProfile = {
+          ...current,
+          xp: current.xp + xpEarned,
+          lastPlayedAt: guestSession.createdAt,
+        };
+
+        writeGuestProfile(updated);
+        return updated;
+      });
+
+      return xpEarned;
+    }
+
+    const response = await fetch("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result),
+    });
+
+    if (!response.ok) {
+      throw new Error("Could not sync this session.");
+    }
+
+    const payload = (await response.json()) as {
+      profile: LearnerProfile;
+      xpEarned: number;
+    };
+
+    setProfile(payload.profile);
+    await loadDashboard();
+
+    return payload.xpEarned;
+  },
+  [isGuest, loadDashboard],
+);
 
   const openProfile = () => {
     setNameDraft(profile.displayName);
@@ -552,12 +659,17 @@ export default function MindicalApp({ initialProfile }: { initialProfile?: Learn
   };
 
   const signOut = async () => {
-    try {
-      await authClient.signOut();
-    } finally {
-      window.location.reload();
-    }
-  };
+  if (isGuest) {
+    onGuestExit?.();
+    return;
+  }
+
+  try {
+    await authClient.signOut();
+  } finally {
+    window.location.reload();
+  }
+};
 
   const saveName = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -569,8 +681,22 @@ export default function MindicalApp({ initialProfile }: { initialProfile?: Learn
     }
 
     setSavingName(true);
-    try {
-      const response = await fetch("/api/profile", {
+
+try {
+  if (isGuest) {
+    const updatedProfile: LearnerProfile = {
+      ...profile,
+      displayName,
+    };
+
+    setProfile(updatedProfile);
+    writeGuestProfile(updatedProfile);
+    setProfileOpen(false);
+    notify("Your guest username was updated.");
+    return;
+  }
+
+  const response = await fetch("/api/profile", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ displayName }),
@@ -838,8 +964,38 @@ export default function MindicalApp({ initialProfile }: { initialProfile?: Learn
             </section>
           )}
 
-          {section === "leaderboard" && (
-            <section className="page-view leaderboard-view">
+{section === "leaderboard" && (
+  isGuest ? (
+    <section className="page-view leaderboard-view">
+      <div className="page-heading-row">
+        <div>
+          <div className="eyebrow">
+            <span className="eyebrow-dot" /> ACCOUNT FEATURE
+          </div>
+          <h1>Join the Mindical community.</h1>
+          <p>
+            You can play every game as a guest. Create an account or sign in
+            to view the leaderboard and save your progress online.
+          </p>
+        </div>
+
+        <div className="leaderboard-trophy">
+          <Icon name="trophy" size={28} />
+        </div>
+      </div>
+
+      <div className="leaderboard-card">
+        <EmptyState
+          icon="user"
+          title="An account is required for the leaderboard."
+          copy="Your guest games are currently stored only on this browser."
+          onAction={() => onGuestExit?.()}
+          action="Sign up or sign in"
+        />
+      </div>
+    </section>
+  ) : (
+    <section className="page-view leaderboard-view">
               <div className="page-heading-row">
                 <div>
                   <div className="eyebrow"><span className="eyebrow-dot" /> FRIENDLY COMPETITION</div>
@@ -862,7 +1018,8 @@ export default function MindicalApp({ initialProfile }: { initialProfile?: Learn
               </div>
               <div className="leaderboard-side-note"><div className="note-icon"><Icon name="award" size={22} /></div><div><strong>Every practice is a win.</strong><span>Scores help us celebrate your effort—not define your ability.</span></div></div>
             </section>
-          )}
+  )
+)}
         </main>
 
         <aside className="right-rail">
@@ -897,7 +1054,14 @@ export default function MindicalApp({ initialProfile }: { initialProfile?: Learn
 
       <footer className="site-footer"><span>mindical<span className="footer-dot">.</span> <small>MAKE A LITTLE ROOM TO THINK.</small></span><span>{loading ? "Connecting your progress…" : syncOffline ? "Your games still work offline." : "Progress stays with this browser profile."}</span></footer>
 
-      {activeGame && <GameOverlay mode={activeGame} onClose={() => setActiveGame(null)} onComplete={handleSessionComplete} />}
+      {activeGame && (
+  <GameOverlay
+    mode={activeGame}
+    onClose={() => setActiveGame(null)}
+    onComplete={handleSessionComplete}
+    isGuest={isGuest}
+  />
+)}
 
       {profileOpen && (
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setProfileOpen(false); }}>
@@ -906,14 +1070,30 @@ export default function MindicalApp({ initialProfile }: { initialProfile?: Learn
             <div className="modal-avatar">{initials(profile.displayName)}</div>
             <div className="eyebrow modal-eyebrow"><span className="eyebrow-dot" /> YOUR MINDICAL PROFILE</div>
             <h2 id="profile-title">Make yourself at home.</h2>
-            <p>Your progress is saved to your account. Choose the username other players will see.</p>
+            <p>
+              {isGuest
+                ? "You are playing as a guest. Your progress is stored only on this browser."
+                : "Your progress is saved to your account. Choose the username other players will see."}
+            </p>
             <form className="profile-form" onSubmit={saveName}>
               <label htmlFor="display-name">Username</label>
               <input id="display-name" autoFocus maxLength={20} autoCapitalize="none" spellCheck={false} value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} placeholder="Your username" />
               <div className="profile-form-actions"><button type="button" className="secondary-button" onClick={() => setProfileOpen(false)}>Not now</button><button type="submit" className="primary-button" disabled={savingName || !nameDraft.trim()}>{savingName ? "Saving…" : "Save username"}</button></div>
             </form>
-            <div className="privacy-note"><Icon name="check" size={14} /> Your progress is stored securely with your account.</div>
-            <button type="button" className="secondary-button signout-button" onClick={signOut}>Sign out</button>
+            <div className="privacy-note">
+  <Icon name="check" size={14} />
+  {isGuest
+    ? "Guest progress is stored locally and is not added to the online leaderboard."
+    : "Your progress is stored securely with your account."}
+</div>
+
+<button
+  type="button"
+  className="secondary-button signout-button"
+  onClick={signOut}
+>
+  {isGuest ? "Sign up or sign in" : "Sign out"}
+</button>
           </section>
         </div>
       )}
@@ -986,10 +1166,12 @@ function GameOverlay({
   mode,
   onClose,
   onComplete,
+  isGuest,
 }: {
   mode: GameMode;
   onClose: () => void;
   onComplete: (result: RunResult) => Promise<number>;
+  isGuest: boolean;
 }) {
   const game = GAMES.find((item) => item.id === mode) ?? GAMES[0];
   const [trackingTime, setTrackingTime] = useState<number>(DROP_TIMES[0]);
@@ -1371,7 +1553,17 @@ function GameOverlay({
               </div>
             )}
             <div className="result-metrics"><div><span>YOUR SCORE</span><strong>{summary.score.toLocaleString()}</strong></div><div><span>ACCURACY</span><strong>{summary.accuracy}<small>%</small></strong></div><div><span>BEST STREAK</span><strong>{summary.bestStreak}<small>×</small></strong></div></div>
-            <div className={`xp-earned ${saveState === "offline" ? "is-offline" : ""}`}><span className="xp-earned-icon"><Icon name={saveState === "offline" ? "sparkle" : "award"} size={17} /></span><span>{saveState === "saving" ? "Adding your progress…" : saveState === "offline" ? "Session complete · sync unavailable" : "A little more progress"}</span>{saveState === "saved" && <strong>+{xpAward ?? 0} XP</strong>}</div>
+            <div className={`xp-earned ${saveState === "offline" ? "is-offline" : ""}`}><span className="xp-earned-icon"><Icon name={saveState === "offline" ? "sparkle" : "award"} size={17} /></span><span>
+  {saveState === "saving"
+    ? isGuest
+      ? "Saving on this browser…"
+      : "Adding your progress…"
+    : saveState === "offline"
+      ? "Session complete · sync unavailable"
+      : isGuest
+        ? "Saved on this device"
+        : "A little more progress"}
+</span>{saveState === "saved" && <strong>+{xpAward ?? 0} XP</strong>}</div>
             {mode === "tracking" && dropOutcome ? (
               <>
                 <div className="result-actions">
@@ -1383,7 +1575,14 @@ function GameOverlay({
             ) : (
               <div className="result-actions"><button className="primary-button" onClick={onClose}>Back to my day <Icon name="arrow" size={16} /></button><button className="secondary-button" onClick={beginGame}>Play again</button></div>
             )}
-            {saveState === "saved" && <div className="saved-note"><Icon name="check" size={13} /> Your session has been added to your progress.</div>}
+            {saveState === "saved" && (
+  <div className="saved-note">
+    <Icon name="check" size={13} />
+    {isGuest
+      ? "This session is saved only on this browser."
+      : "Your session has been added to your progress."}
+  </div>
+)}
           </div>
         )}
       </section>

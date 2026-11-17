@@ -282,3 +282,14 @@ button:disabled { cursor: not-allowed; }
 .auth-form input.auth-code { font-size: 22px; letter-spacing: .3em; text-align: center; }
 .auth-switch:disabled { opacity: .6; cursor: default; }
 .auth-hint { display: block; margin-top: 8px; color: #8b93a6; font-size: 12px; line-height: 1.4; }
+/* Keep the sign-in and guest form accessible on short screens. */
+.modal-backdrop:has(.auth-card) {
+  overflow-y: auto;
+  align-items: flex-start;
+  padding: 16px;
+}
+
+.modal-backdrop .auth-card {
+  margin: auto;
+  flex-shrink: 0;
+}

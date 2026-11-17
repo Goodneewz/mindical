@@ -1,7 +1,13 @@
 "use client";
 
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import MindicalApp from "@/components/mindical-app";
 import { authClient } from "@/lib/auth/client";
+import {
+  cleanUsername,
+  USERNAME_HINT,
+  validateUsername,
+} from "@/lib/username";
 
 type View = "signin" | "signup" | "verify" | "forgot" | "reset";
 type Failure = { message: string; status: number; code: string };
@@ -11,6 +17,50 @@ type Failure = { message: string; status: number; code: string };
 const FLOW_KEY = "mindical-auth-flow";
 const RESUMABLE: View[] = ["verify", "forgot", "reset"];
 type SavedFlow = { view: View; email: string; codeSent: boolean };
+
+type GuestProfile = {
+  id: string;
+  displayName: string;
+  xp: number;
+  streak: number;
+  lastPlayedAt: string | null;
+};
+
+const GUEST_PROFILE_KEY = "mindical-guest-profile";
+const GUEST_ACTIVE_KEY = "mindical-guest-active";
+
+function readGuestProfile(): GuestProfile | null {
+  if (typeof window === "undefined") return null;
+
+  try {
+    if (window.localStorage.getItem(GUEST_ACTIVE_KEY) !== "1") {
+      return null;
+    }
+
+    const raw = window.localStorage.getItem(GUEST_PROFILE_KEY);
+    if (!raw) return null;
+
+    const saved = JSON.parse(raw) as Partial<GuestProfile>;
+
+    if (
+      typeof saved.displayName !== "string" ||
+      validateUsername(saved.displayName)
+    ) {
+      return null;
+    }
+
+    return {
+      id: "guest",
+      displayName: saved.displayName,
+      xp: typeof saved.xp === "number" ? saved.xp : 0,
+      streak: typeof saved.streak === "number" ? saved.streak : 0,
+      lastPlayedAt:
+        typeof saved.lastPlayedAt === "string" ? saved.lastPlayedAt : null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function readFlow(): SavedFlow | null {
   if (typeof window === "undefined") return null;
@@ -68,13 +118,90 @@ function needsVerification(failure: Failure): boolean {
 
 export function AuthGate({ children }: { children: ReactNode }) {
   const { data: session, isPending } = authClient.useSession();
+  const [guestProfile, setGuestProfile] = useState<GuestProfile | null>(null);
+  const [guestChecked, setGuestChecked] = useState(false);
 
-  if (isPending) return <div className="mindical-app" aria-busy="true" />;
-  if (!session) return <AuthScreen />;
-  return <>{children}</>;
+  useEffect(() => {
+    setGuestProfile(readGuestProfile());
+    setGuestChecked(true);
+  }, []);
+
+  const continueAsGuest = (username: string) => {
+    const displayName = cleanUsername(username);
+
+    let existing: GuestProfile | null = null;
+
+    try {
+      const raw = window.localStorage.getItem(GUEST_PROFILE_KEY);
+      if (raw) {
+        existing = JSON.parse(raw) as GuestProfile;
+      }
+    } catch {
+      existing = null;
+    }
+
+    const profile: GuestProfile = {
+      id: "guest",
+      displayName,
+      xp: typeof existing?.xp === "number" ? existing.xp : 0,
+      streak: typeof existing?.streak === "number" ? existing.streak : 0,
+      lastPlayedAt:
+        typeof existing?.lastPlayedAt === "string"
+          ? existing.lastPlayedAt
+          : null,
+    };
+
+    try {
+      window.localStorage.setItem(
+        GUEST_PROFILE_KEY,
+        JSON.stringify(profile),
+      );
+      window.localStorage.setItem(GUEST_ACTIVE_KEY, "1");
+    } catch {
+      // Guest mode still works if browser storage is unavailable.
+    }
+
+    setGuestProfile(profile);
+  };
+
+  const leaveGuestMode = () => {
+    try {
+      // Keep local guest progress in case the player returns later.
+      window.localStorage.removeItem(GUEST_ACTIVE_KEY);
+    } catch {
+      // Ignore unavailable browser storage.
+    }
+
+    setGuestProfile(null);
+  };
+
+  if (isPending || !guestChecked) {
+    return <div className="mindical-app" aria-busy="true" />;
+  }
+
+  // Always prefer a real authenticated account.
+  if (session) {
+    return <>{children}</>;
+  }
+
+  if (guestProfile) {
+    return (
+      <MindicalApp
+        initialProfile={guestProfile}
+        isGuest
+        onGuestExit={leaveGuestMode}
+      />
+    );
+  }
+
+  return <AuthScreen onContinueAsGuest={continueAsGuest} />;
 }
 
-export function AuthScreen() {
+export function AuthScreen({
+  onContinueAsGuest,
+}: {
+  onContinueAsGuest?: (username: string) => void;
+} = {}) {
   const [saved] = useState(readFlow);
   const [view, setView] = useState<View>(saved?.view ?? "signin");
   const [email, setEmail] = useState(saved?.email ?? "");
@@ -86,6 +213,9 @@ export function AuthScreen() {
   const [info, setInfo] = useState(saved && saved.view !== "forgot" ? "Enter the 6-digit code we sent to your email." : "");
   const [codeSent, setCodeSent] = useState(saved?.codeSent ?? false);
   const [cooldown, setCooldown] = useState(0);
+  const [guestUsername, setGuestUsername] = useState("");
+  const [guestError, setGuestError] = useState("");
+
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -98,6 +228,21 @@ export function AuthScreen() {
   }, [view, email, codeSent]);
 
   const cleanEmail = email.trim().toLowerCase();
+
+  const submitGuest = (event: FormEvent<HTMLFormElement>) => {
+  event.preventDefault();
+
+  const displayName = cleanUsername(guestUsername);
+  const problem = validateUsername(displayName);
+
+  if (problem) {
+    setGuestError(problem);
+    return;
+  }
+
+  setGuestError("");
+  onContinueAsGuest?.(displayName);
+};
 
   const go = (next: View, notice = "") => {
     setView(next);
@@ -376,6 +521,57 @@ export function AuthScreen() {
           ) : (
             <button type="button" className="auth-switch" onClick={() => go("signin")}>Back to sign in</button>
           )}
+
+          {(view === "signin" || view === "signup") && onContinueAsGuest && (
+  <>
+    <div className="auth-divider">
+      <span>or play without an account</span>
+    </div>
+
+    <form
+      className="profile-form auth-form"
+      onSubmit={submitGuest}
+      noValidate
+    >
+      <label htmlFor="guest-username">Username</label>
+
+      <input
+        id="guest-username"
+        maxLength={20}
+        autoCapitalize="none"
+        autoCorrect="off"
+        spellCheck={false}
+        value={guestUsername}
+        onChange={(event) => {
+          setGuestUsername(event.target.value);
+          setGuestError("");
+        }}
+        placeholder="e.g. brainy.fox"
+      />
+
+      <small className="auth-hint">{USERNAME_HINT}</small>
+
+      {guestError && (
+        <small className="auth-error" role="alert">
+          {guestError}
+        </small>
+      )}
+
+      <button
+        type="submit"
+        className="secondary-button auth-submit"
+        disabled={!guestUsername.trim()}
+      >
+        Continue without signing up
+      </button>
+
+      <small className="auth-hint">
+        Guest progress stays on this browser. Sign up to save progress online
+        and access the leaderboard.
+      </small>
+    </form>
+  </>
+)}
         </section>
       </div>
     </div>
