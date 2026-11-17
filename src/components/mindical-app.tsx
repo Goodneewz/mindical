@@ -277,17 +277,17 @@ const DROP_COLORS: { id: DropColorId; label: string; hex: string }[] = [
   { id: "pink", label: "Pink", hex: "#e9459d" },
 ];
 const DROP_TIMES = [30, 50, 70, 90];
-const DROP_LANES = [6, 25, 44, 63, 82];
-const DROP_POOL = 14;
+const DROP_LANES = [6, 16, 26, 36, 46, 56, 66, 76, 86];
+const DROP_POOL = 25;
 const DROP_SLOW_RATE = 0.5;
 const DROP_SLOW_MS = 4000;
-const DROP_SLOW_USES = 2;
+const DROP_SLOW_USES = 1;
 const DROP_LEVEL_KEY = "mindical-drop-level";
 
 function dropSettings(level: number) {
   return {
-    fall: Math.max(0.8, 1.8 - 0.15 * (level - 1)),
-    gap: Math.max(0.45, 0.7 - 0.04 * (level - 1)),
+    fall: Math.max(0.3, 1.0 - 0.15 * (level - 1)),
+    gap: Math.max(0.15, 0.35 - 0.04 * (level - 1)),
   };
 }
 
